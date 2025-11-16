@@ -1,8 +1,18 @@
+"""Main FastAPI application"""
+
 from fastapi import FastAPI
+import logging
 from fastapi.middleware.cors import CORSMiddleware
+from routers import health, upload, query
+
+
+logger = logging.getLogger("uvicorn.error")
+logger.setLevel(logging.DEBUG)
 
 app = FastAPI(
-    title="Exceeded Tokens API", description="A FastAPI application", version="1.0.0"
+    title="Exceeded Tokens API",
+    description="A FastAPI application for processing PDFs and generating embeddings",
+    version="1.0.0",
 )
 
 # Configure CORS
@@ -14,20 +24,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Include routers
+app.include_router(health.router)
+app.include_router(upload.router)
+app.include_router(query.router)
 
-@app.get("/")
-async def root():
-    """Root endpoint"""
-    return {"message": "Welcome to Exceeded Tokens API"}
+# if __name__ == "__main__":
+#     import uvicorn
 
-
-@app.get("/health")
-async def health_check():
-    """Health check endpoint"""
-    return {"status": "healthy"}
-
-
-@app.get("/api/v1/hello/{name}")
-async def hello(name: str):
-    """Sample endpoint with path parameter"""
-    return {"message": f"Hello, {name}!"}
+#     uvicorn.run(app, host="0.0.0.0", port=8000, debug=True)
