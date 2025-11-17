@@ -1,26 +1,21 @@
 """Application configuration and client initialization"""
 
 import os
+from redis import Redis
+from openai import OpenAI
 from dotenv import load_dotenv
 from qdrant_client import QdrantClient
-from openai import OpenAI
 
-# Force .env to override any existing env vars (like old TELEGRAM_DEFAULT_COLLECTION)
 load_dotenv(override=True)
 
-# --- raw env values ---
+# OpenAI Configuration
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
-QDRANT_URL = os.getenv("QDRANT_URL")
-
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_DEFAULT_COLLECTION = os.getenv("TELEGRAM_DEFAULT_COLLECTION")
-
-# Debug print (optional but useful right now)
-print(f"[config] TELEGRAM_DEFAULT_COLLECTION = {TELEGRAM_DEFAULT_COLLECTION!r}")
-
-# --- clients ---
 openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+
+
+# Qdrant Configuration
+QDRANT_URL = os.getenv("QDRANT_URL")
+QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
 
 qdrant_client = (
     QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
@@ -28,9 +23,18 @@ qdrant_client = (
     else None
 )
 
-# --- Telegram base URL for API calls ---
+
+# Telegram Configuration
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_DEFAULT_COLLECTION = os.getenv("TELEGRAM_DEFAULT_COLLECTION")
 TELEGRAM_API_BASE = (
-    f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
-    if TELEGRAM_BOT_TOKEN
-    else None
+    f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}" if TELEGRAM_BOT_TOKEN else None
 )
+
+
+# Redis Configuration
+REDIS_HOST = os.getenv("REDIS_HOST")
+REDIS_PORT = os.getenv("REDIS_PORT")
+REDIS_DB = os.getenv("REDIS_DB")
+
+redis_client = Redis.from_url(os.getenv("REDIS_URL"))
