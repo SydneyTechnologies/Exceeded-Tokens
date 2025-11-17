@@ -1,308 +1,308 @@
 # Exceeded Tokens API
 
-A FastAPI application for processing PDF documents, generating embeddings using OpenAI, and storing them in Qdrant vector database.
+A FastAPI application for processing PDF documents, generating embeddings using OpenAI, and storing them in a Qdrant vector database. It supports both HTTP APIs and a Telegram bot interface for asking questions over your documents.
+
+---
 
 ## Requirements
 
-- Python 3.13+ (compatible with Python 3.13)
-- OpenAI API Key
-- Qdrant API Key and URL
+- Python 3.10+ (works fine on 3.13)
+- OpenAI API key
+- Qdrant Cloud cluster (or self-hosted Qdrant) with API key + URL
+- (Optional) Telegram bot token
+- (Optional) ngrok / any HTTPS tunnel for webhooks
+
+---
 
 ## Setup
 
-1. Create a virtual environment:
+### 1. Create and activate a virtual environment
 
-```bash
+~~~bash
 python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-```
 
-2. Install dependencies:
+# Windows
+venv\Scripts\activate
 
-```bash
+# macOS / Linux
+source venv/bin/activate
+~~~
+
+### 2. Install dependencies
+
+~~~bash
 pip install -r requirements.txt
-```
+~~~
 
-> **Note:** This project uses pydantic 2.9+ which is compatible with Python 3.13. Earlier versions of pydantic may have compatibility issues with Python 3.13.
+### 3. Configure environment variables
 
-3. Set up environment variables:
+Create a `.env` file in the project root:
 
-Create a `.env` file in the root directory with the following variables:
+~~~bash
+OPENAI_API_KEY=your-openai-api-key
+QDRANT_URL=your-qdrant-url
+QDRANT_API_KEY=your-qdrant-api-key
 
-```env
-# OpenAI API Key
-OPENAI_API_KEY=your_openai_api_key_here
+# Optional for Telegram integration
+TELEGRAM_BOT_TOKEN=your-telegram-bot-token
+TELEGRAM_DEFAULT_COLLECTION=fake_company
+~~~
 
-# Qdrant Configuration
-QDRANT_API_KEY=your_qdrant_api_key_here
-QDRANT_URL=https://your-qdrant-instance.cloud.qdrant.io:6333
-
-# Telegram (optional)
-TELEGRAM_BOT_TOKEN=your_telegram_bot_token
-TELEGRAM_DEFAULT_COLLECTION=collection_to_query_by_default
-```
+---
 
 ## Running the Application
 
-Start the development server:
+### Local dev server
 
-```bash
+~~~bash
 uvicorn main:app --reload
-```
+~~~
 
-The API will be available at `http://localhost:8000`
+The API will be available at:
 
-## API Documentation
+- <http://localhost:8000>
+- <http://localhost:8000/docs> (Swagger UI)
+- <http://localhost:8000/redoc> (ReDoc)
 
-Once the server is running, you can access:
+### Optional: run with ngrok (for Telegram webhooks)
 
-- Interactive API docs (Swagger UI): `http://localhost:8000/docs`
-- Alternative API docs (ReDoc): `http://localhost:8000/redoc`
+If you created a helper script like `run_with_ngrok.py`:
 
-## Available Endpoints
+~~~bash
+python run_with_ngrok.py
+~~~
 
-- `GET /` - Root endpoint
-- `GET /health` - Health check endpoint
-- `GET /api/v1/hello/{name}` - Sample greeting endpoint
-- `POST /api/v1/{collection}/upload` - Upload PDF file and generate embeddings
-- `POST /api/v1/{collection}/query` - Query a collection using RAG (Retrieval Augmented Generation)
-- `POST /webhooks/telegram` - Telegram webhook for document queries
+Typical behaviour:
 
-### PDF Upload Endpoint
+- Starts `uvicorn main:app --host 0.0.0.0 --port 8000`
+- Starts `ngrok http 8000`
+- Prints your public ngrok URL so you can plug it into Telegram’s `setWebhook`.
 
-The `/api/v1/{collection}/upload` endpoint accepts a PDF file, extracts text from each page, generates embeddings using OpenAI's `text-embedding-3-small` model, and stores them in the specified Qdrant collection.
+---
 
-**Request:**
+## High-Level Behaviour Changes
 
-- Method: `POST`
-- Path parameter: `collection` - Name of the Qdrant collection to store embeddings
-- Body: `multipart/form-data` with a PDF file
+Compared to a naïve “one vector per page” setup, this project now has:
 
-**Example using curl:**
+### 1. Semantic chunking of PDFs (Q&A-aware)
 
-```bash
-curl -X POST "http://localhost:8000/api/v1/my_collection/upload" \
+- PDFs are not stored as one vector per page anymore.
+- Each page is split into smaller text chunks:
+  - Lines ending with `?` are treated as question headers.
+  - Each question is grouped with its following answer lines until the next question or end of page.
+  - Non-question lines (headings, short paragraphs) become their own small chunks.
+- This is tuned for FAQ / Q&A-style docs like `fake_company_qa.pdf`.
+
+### 2. Qdrant stores chunks, not pages
+
+Each chunk gets:
+
+- `filename`
+- `page_number` (original PDF page, 1-based)
+- `text` (one Q&A or paragraph)
+- `total_pages` (currently the total number of chunks inserted for this upload)
+
+### 3. Telegram bot with default collection + clean answers
+
+- You can ask questions directly in Telegram.
+- If the message contains `collection::question`, it will search that specific collection.
+- Otherwise, it searches `TELEGRAM_DEFAULT_COLLECTION` from `.env` (with hard fallback to `"fake_company"` if env is misconfigured).
+- Telegram replies now return just the best-matching chunk text (one Q&A) – no extra boilerplate like “Here’s what I found…” and no `(Source: …)` footer.
+
+---
+
+## API Endpoints
+
+### Health & utility
+
+- `GET /` – Root endpoint  
+- `GET /health` – Health check
+
+---
+
+### PDF Upload
+
+`POST /api/v1/{collection}/upload`
+
+Upload a PDF, extract text, chunk it into Q&A/paragraph segments, embed each chunk with OpenAI, and store into Qdrant.
+
+**Path parameter**
+
+- `collection` – Target Qdrant collection name (e.g. `fake_company`).
+
+**Body**
+
+- `multipart/form-data` with a `file` field containing the PDF.
+
+**Example**
+
+~~~bash
+curl -X POST "http://localhost:8000/api/v1/fake_company/upload" \
   -H "accept: application/json" \
   -H "Content-Type: multipart/form-data" \
-  -F "file=@/path/to/your/document.pdf"
-```
+  -F "file=@fake_company_qa.pdf;type=application/pdf"
+~~~
 
-**Response:**
+**Typical Response**
 
-```json
+~~~json
 {
   "message": "PDF processed and uploaded successfully",
-  "filename": "document.pdf",
-  "pages_processed": 10,
-  "embeddings_generated": 10,
-  "collection": "my_collection"
+  "filename": "fake_company_qa.pdf",
+  "pages_processed": 19,
+  "embeddings_generated": 19,
+  "collection": "fake_company"
 }
-```
+~~~
 
-**Features:**
+`pages_processed` and `embeddings_generated` correspond to extracted text chunks (Q&A items / paragraphs), not literal PDF pages.
 
-- Extracts text from each page of the PDF
-- Generates vector embeddings using OpenAI's `text-embedding-3-small` model (1536 dimensions)
-- Automatically creates Qdrant collection if it doesn't exist
-- Stores each page as a separate vector with metadata:
-  - `filename`: Original PDF filename
-  - `page_number`: Page number (1-indexed)
-  - `text`: Extracted text content
-  - `total_pages`: Total number of pages in the PDF
+---
 
 ### RAG Query Endpoint
 
-The `/api/v1/{collection}/query` endpoint allows you to perform semantic search on a collection using natural language queries. This is the core RAG (Retrieval Augmented Generation) functionality that enables LLMs to query your documents.
+`POST /api/v1/{collection}/query`
 
-**Request:**
+Perform semantic search over a Qdrant collection using OpenAI embeddings. Results correspond to the chunks created during upload.
 
-- Method: `POST`
-- Path parameter: `collection` - Name of the Qdrant collection to query
-- Body: `application/json`
+**Request**
 
-```json
+~~~json
 {
-  "query": "What is the main topic of this document?",
+  "query": "What is the company about?",
   "limit": 5,
-  "score_threshold": 0.7
+  "score_threshold": 0.3
 }
-```
+~~~
 
-**Request Parameters:**
+- `query` (**required**) – Natural language question.
+- `limit` (optional, default 5) – Max number of hits to return (1–50).
+- `score_threshold` (optional) – Minimum similarity score; results below this are filtered out.
 
-- `query` (required): The search query in natural language
-- `limit` (optional, default: 5): Maximum number of results to return (1-50)
-- `score_threshold` (optional): Minimum similarity score threshold (0-1). Only results with scores above this threshold will be returned
+**Example**
 
-**Example using curl:**
-
-```bash
-curl -X POST "http://localhost:8000/api/v1/my_collection/query" \
+~~~bash
+curl -X POST "http://localhost:8000/api/v1/fake_company/query" \
   -H "accept: application/json" \
   -H "Content-Type: application/json" \
-  -d '{
-    "query": "What are the key features of the product?",
-    "limit": 3,
-    "score_threshold": 0.5
-  }'
-```
+  -d '{"query": "What is the company about?", "limit": 5}'
+~~~
 
-**Example using Python:**
+**Typical Response**
 
-```python
-import requests
-
-response = requests.post(
-    "http://localhost:8000/api/v1/my_collection/query",
-    json={
-        "query": "What are the key features of the product?",
-        "limit": 3,
-        "score_threshold": 0.5
-    }
-)
-
-data = response.json()
-print(f"Found {data['total_results']} results:")
-for result in data['results']:
-    print(f"\nScore: {result['score']:.4f}")
-    print(f"Source: {result['filename']}, Page {result['page_number']}")
-    print(f"Text: {result['text'][:200]}...")
-```
-
-**Response:**
-
-```json
+~~~json
 {
-  "query": "What are the key features of the product?",
-  "collection": "my_collection",
+  "query": "What is the company about?",
+  "collection": "fake_company",
   "results": [
     {
-      "id": "550e8400-e29b-41d4-a716-446655440000",
-      "score": 0.8756,
-      "filename": "document.pdf",
-      "page_number": 3,
-      "text": "Our product features include...",
-      "total_pages": 10
-    },
-    {
-      "id": "550e8400-e29b-41d4-a716-446655440001",
-      "score": 0.8234,
-      "filename": "document.pdf",
-      "page_number": 5,
-      "text": "Additional capabilities are...",
-      "total_pages": 10
+      "id": "73b6dd99-6449-4055-9871-8fa023e772fe",
+      "score": 0.29,
+      "filename": "fake_company_qa.pdf",
+      "page_number": 1,
+      "text": "Q1. What is UrbanVista Real Estate & Marketing Agency?\nA1. UrbanVista Real Estate & Marketing Agency is a full-service firm based in Dubai...",
+      "total_pages": 19
     }
   ],
-  "total_results": 2
+  "total_results": 1
 }
-```
+~~~
 
-**Response Fields:**
+This is exactly what the Telegram bot will surface (cleaned to just the `text` field).
 
-- `query`: The original search query
-- `collection`: The collection that was searched
-- `results`: Array of search results, sorted by relevance (highest score first)
-  - `id`: Unique identifier of the vector
-  - `score`: Similarity score (0-1, higher is more relevant)
-  - `filename`: Source PDF filename
-  - `page_number`: Page number in the source document
-  - `text`: The text content from that page
-  - `total_pages`: Total pages in the source document
-- `total_results`: Number of results returned
+---
 
-**Use Cases:**
+## Telegram Bot Integration
 
-- **LLM Context Retrieval**: Fetch relevant context for LLM prompts
-- **Document Q&A**: Answer questions based on document content
-- **Semantic Search**: Find relevant information using natural language
-- **Content Discovery**: Explore documents without reading them entirely
+The Telegram webhook reuses the same embedding + Qdrant flow as the HTTP API.
 
-**Integration with LLMs:**
+### How messages are interpreted
 
-This endpoint is designed to work seamlessly with LLMs. Here's a typical workflow:
+- **Plain question**
 
-1. User asks a question
-2. Call this endpoint to retrieve relevant context from your documents
-3. Combine the retrieved context with the user's question
-4. Send to an LLM (like GPT-4) for a comprehensive answer
+  ~~~text
+  What is the company about?
+  ~~~
 
-Example:
+  → Searches `TELEGRAM_DEFAULT_COLLECTION` from `.env` (e.g., `fake_company`).
 
-```python
-import openai
+- **Targeting a specific collection**
 
-# Step 1: Get relevant context
-response = requests.post(
-    "http://localhost:8000/api/v1/my_collection/query",
-    json={"query": "What is the company's return policy?", "limit": 3}
-)
-contexts = [r['text'] for r in response.json()['results']]
+  ~~~text
+  fake_company::What services does UrbanVista offer?
+  ~~~
 
-# Step 2: Create prompt with context
-prompt = f"""Based on the following context, answer the question.
+  → Uses `fake_company` as the collection, regardless of the default.
 
-Context:
-{chr(10).join(contexts)}
+- **`/start`**
 
-Question: What is the company's return policy?
+  Sends a short help message explaining usage.
 
-Answer:"""
+---
 
-# Step 3: Get answer from LLM
-completion = openai.ChatCompletion.create(
-    model="gpt-4",
-    messages=[{"role": "user", "content": prompt}]
-)
-print(completion.choices[0].message.content)
-```
+### Answer formatting (current behaviour)
+
+When you ask a question, the bot:
+
+1. Generates an embedding for your question.  
+2. Does a vector search in Qdrant (`limit=3` by default).  
+3. Takes the single best result.  
+4. Returns only the chunk text (no prefix, no source footer), e.g.:
+
+~~~text
+Q1. What is UrbanVista Real Estate & Marketing Agency?
+A1. UrbanVista Real Estate & Marketing Agency is a full-service firm based in Dubai that ...
+~~~
+
+This keeps the conversation in Telegram looking like normal chat, but backed by your Qdrant collection.
+
+---
+
+### Setting the webhook (once you have a public URL)
+
+~~~bash
+curl -X POST "https://api.telegram.org/bot<YOUR_TOKEN>/setWebhook" \
+  -d "url=https://<your-public-domain-or-ngrok-url>/webhooks/telegram"
+~~~
+
+---
+
+## PDF Processing Details (`services/pdf_service.py`)
+
+To make Q&A documents work well with RAG and Telegram:
+
+- We use **PyPDF2** to extract text from each page.
+- For each page:
+  - Split into non-empty lines.
+  - If a line ends with `?`, it’s treated as a question line.
+  - That question is grouped with subsequent lines as its answer block, until the next question or end of page.
+  - Non-question lines (headings, standalone blurbs) become their own chunk.
+- If, for some reason, no chunks are detected on a page, the whole page text is stored as a single chunk (fallback).
+- Each chunk is then sent to `embedding_service.generate_embeddings()` and persisted via `qdrant_service.store_embeddings()`.
+
+This is why a Q&A-formatted file like `fake_company_qa.pdf` works especially well: each FAQ entry becomes one clean vector that the query & Telegram layers can retrieve directly.
+
+---
 
 ## Project Structure
 
-```
+~~~text
 .
-├── main.py                      # Main FastAPI application
-├── config.py                    # Configuration and client initialization
-├── requirements.txt             # Python dependencies
-├── .env                         # Environment variables (create this)
-├── routers/                     # API route handlers
-│   ├── health.py               # Health check endpoints
-│   ├── upload.py               # PDF upload and processing endpoints
-│   ├── query.py                # RAG query endpoints
-│   └── telegram.py             # Telegram webhook integration
-├── services/                    # Business logic services
-│   ├── pdf_service.py          # PDF text extraction
-│   ├── embedding_service.py    # OpenAI embedding generation
-│   └── qdrant_service.py       # Qdrant vector database operations
-├── resources/                   # Sample resources directory
-│   └── fake_company.pdf        # Sample PDF file
-└── README.md                   # This file
-```
-
-## Telegram Bot Integration (optional)
-
-1. **Create a bot** using [@BotFather](https://t.me/BotFather) and copy the token.
-2. **Update `.env`** with `TELEGRAM_BOT_TOKEN` and set `TELEGRAM_DEFAULT_COLLECTION` to the Qdrant collection you want queried when users do not specify one.
-3. **Expose your FastAPI app** publicly (e.g., HTTPS domain, ngrok, Cloudflare Tunnel).
-4. **Set the webhook**:
-   ```bash
-   curl -X POST "https://api.telegram.org/bot<YOUR_TOKEN>/setWebhook" \
-        -d "url=https://your-domain.com/webhooks/telegram"
-   ```
-5. **Use the bot**:
-   - Send any question to search the default collection.
-   - Use `collection::your question` to target a specific collection.
-   - Send `/start` to see usage instructions.
-
-The webhook handler reuses the same embedding + Qdrant workflow as the HTTP API, so all uploaded documents are immediately searchable from Telegram.
-
-## Dependencies
-
-- **fastapi**: Web framework for building APIs
-- **uvicorn**: ASGI server for running FastAPI
-- **pydantic**: Data validation using Python type annotations
-- **python-multipart**: Support for form data and file uploads
-- **qdrant-client**: Client library for Qdrant vector database
-- **openai**: OpenAI API client for generating embeddings
-- **pypdf2**: PDF file reader and text extraction
-- **python-dotenv**: Environment variable management
-- **httpx**: Async HTTP client used for Telegram interactions
+├── main.py                   # FastAPI app, routers mounted here
+├── config.py                 # Loads .env, initializes OpenAI & Qdrant clients
+├── requirements.txt          # Python dependencies
+├── .env                      # Environment variables (not committed)
+├── routers/
+│   ├── health.py             # / and /health endpoints
+│   ├── upload.py             # /api/v1/{collection}/upload
+│   ├── query.py              # /api/v1/{collection}/query
+│   └── telegram.py           # /webhooks/telegram
+├── services/
+│   ├── pdf_service.py        # PDF -> Q&A/paragraph chunks
+│   ├── embedding_service.py  # OpenAI embedding wrapper
+│   └── qdrant_service.py     # Qdrant collection + search helpers
+├── resources/
+│   └── fake_company_qa.pdf   # Sample Q&A-style PDF
+├── run_with_ngrok.py         # (optional) Helper to run uvicorn + ngrok
+└── README.md                 # This file
+~~~
