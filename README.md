@@ -36,6 +36,10 @@ OPENAI_API_KEY=your_openai_api_key_here
 # Qdrant Configuration
 QDRANT_API_KEY=your_qdrant_api_key_here
 QDRANT_URL=https://your-qdrant-instance.cloud.qdrant.io:6333
+
+# Telegram (optional)
+TELEGRAM_BOT_TOKEN=your_telegram_bot_token
+TELEGRAM_DEFAULT_COLLECTION=collection_to_query_by_default
 ```
 
 ## Running the Application
@@ -62,6 +66,7 @@ Once the server is running, you can access:
 - `GET /api/v1/hello/{name}` - Sample greeting endpoint
 - `POST /api/v1/{collection}/upload` - Upload PDF file and generate embeddings
 - `POST /api/v1/{collection}/query` - Query a collection using RAG (Retrieval Augmented Generation)
+- `POST /webhooks/telegram` - Telegram webhook for document queries
 
 ### PDF Upload Endpoint
 
@@ -262,7 +267,8 @@ print(completion.choices[0].message.content)
 ├── routers/                     # API route handlers
 │   ├── health.py               # Health check endpoints
 │   ├── upload.py               # PDF upload and processing endpoints
-│   └── query.py                # RAG query endpoints
+│   ├── query.py                # RAG query endpoints
+│   └── telegram.py             # Telegram webhook integration
 ├── services/                    # Business logic services
 │   ├── pdf_service.py          # PDF text extraction
 │   ├── embedding_service.py    # OpenAI embedding generation
@@ -271,6 +277,23 @@ print(completion.choices[0].message.content)
 │   └── fake_company.pdf        # Sample PDF file
 └── README.md                   # This file
 ```
+
+## Telegram Bot Integration (optional)
+
+1. **Create a bot** using [@BotFather](https://t.me/BotFather) and copy the token.
+2. **Update `.env`** with `TELEGRAM_BOT_TOKEN` and set `TELEGRAM_DEFAULT_COLLECTION` to the Qdrant collection you want queried when users do not specify one.
+3. **Expose your FastAPI app** publicly (e.g., HTTPS domain, ngrok, Cloudflare Tunnel).
+4. **Set the webhook**:
+   ```bash
+   curl -X POST "https://api.telegram.org/bot<YOUR_TOKEN>/setWebhook" \
+        -d "url=https://your-domain.com/webhooks/telegram"
+   ```
+5. **Use the bot**:
+   - Send any question to search the default collection.
+   - Use `collection::your question` to target a specific collection.
+   - Send `/start` to see usage instructions.
+
+The webhook handler reuses the same embedding + Qdrant workflow as the HTTP API, so all uploaded documents are immediately searchable from Telegram.
 
 ## Dependencies
 
@@ -282,3 +305,4 @@ print(completion.choices[0].message.content)
 - **openai**: OpenAI API client for generating embeddings
 - **pypdf2**: PDF file reader and text extraction
 - **python-dotenv**: Environment variable management
+- **httpx**: Async HTTP client used for Telegram interactions

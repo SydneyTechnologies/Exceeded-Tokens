@@ -3,7 +3,7 @@
 from fastapi import FastAPI
 import logging
 from fastapi.middleware.cors import CORSMiddleware
-from routers import health, upload, query
+from routers import health, upload, query, telegram
 
 
 logger = logging.getLogger("uvicorn.error")
@@ -28,6 +28,7 @@ app.add_middleware(
 app.include_router(health.router)
 app.include_router(upload.router)
 app.include_router(query.router)
+app.include_router(telegram.router)
 
 # if __name__ == "__main__":
 #     import uvicorn
