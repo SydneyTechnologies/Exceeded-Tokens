@@ -2,9 +2,13 @@ import json
 from typing import List
 from config import redis_client
 from pydantic import BaseModel
-from fastapi import APIRouter
+from fastapi import APIRouter, Body
 
 router = APIRouter(prefix="/api/v1", tags=["chat"])
+
+
+class SessionRequest(BaseModel):
+    session_id: str
 
 
 class Message(BaseModel):
@@ -12,8 +16,14 @@ class Message(BaseModel):
     content: str
 
 
-@router.get("/chat/{session_id}")
-async def get_chat_history(session_id: str):
+class ChatObject(BaseModel):
+    session_id: str
+    messages: List[Message]
+
+
+@router.post("/chat/history")
+async def get_chat_history(session_request: SessionRequest):
+    session_id = session_request.session_id
     # Use pipeline to get data and check TTL in one round-trip
     pipe = redis_client.pipeline()
     pipe.lrange(session_id, 0, -1)
@@ -25,13 +35,15 @@ async def get_chat_history(session_id: str):
     return {"messages": decoded_history, "expires_in_seconds": ttl if ttl > 0 else None}
 
 
-@router.post("/chat/{session_id}")
-async def add_message_to_chat(session_id: str, message: List[Message]):
+@router.post("/chat")
+async def add_message_to_chat(chat_object: ChatObject):
+    session_id = chat_object.session_id
+    messages = chat_object.messages
     # Use pipeline to batch all operations into a single network round-trip
     pipe = redis_client.pipeline()
 
     # Serialize all messages
-    serialized_messages = [msg.model_dump_json() for msg in message]
+    serialized_messages = [msg.model_dump_json() for msg in messages]
 
     # Add all messages at once using rpush with unpacking
     if serialized_messages:
@@ -43,10 +55,11 @@ async def add_message_to_chat(session_id: str, message: List[Message]):
 
     pipe.execute()
 
-    return {"message": f"Added {len(message)} message(s) to chat history"}
+    return {"message": f"Added {len(messages)} message(s) to chat history"}
 
 
-@router.delete("/chat/{session_id}")
-async def delete_chat_history(session_id: str):
+@router.delete("/chat")
+async def delete_chat_history(session_request: SessionRequest):
+    session_id = session_request.session_id
     redis_client.delete(session_id)
     return {"message": "Chat history deleted"}
