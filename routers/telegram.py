@@ -1,257 +1,205 @@
 """Telegram webhook integration for querying uploaded documents"""
 
 import logging
+import json
 import re
-from typing import Optional, Tuple, List
+from typing import Optional, Dict, Any
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel
 
 from config import (
     TELEGRAM_API_BASE,
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_DEFAULT_COLLECTION,
-    openai_client,
-    qdrant_client,
 )
-from services.embedding_service import generate_embeddings
-from services.qdrant_service import search_collection
+
+OPUS_BASE = "https://operator.opus.com"
 
 logger = logging.getLogger("uvicorn.error")
-router = APIRouter(prefix="/webhooks", tags=["telegram"])
-
-# Hard fallback if env var is missing or wrong
-DEFAULT_FALLBACK_COLLECTION = "fake_company"
+router = APIRouter(prefix="/api/v1/telegram", tags=["telegram"])
 
 
-async def send_telegram_message(chat_id: int, text: str) -> None:
-    """Send a message back to a Telegram chat."""
-    if not TELEGRAM_API_BASE:
-        logger.error("Telegram API base URL is not configured")
-        return
+class TelegramMessage(BaseModel):
+    """Telegram message model"""
 
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            response = await client.post(
-                f"{TELEGRAM_API_BASE}/sendMessage",
-                json={"chat_id": chat_id, "text": text},
+    message_id: int
+    text: Optional[str] = None
+    chat: Dict[str, Any]
+    from_user: Optional[Dict[str, Any]] = None
+
+    class Config:
+        json_schema_extra = {
+            "alias_generator": lambda field_name: field_name.replace(
+                "from_user", "from"
             )
-            response.raise_for_status()
-    except Exception as exc:
-        logger.error(f"Failed to send Telegram message: {exc}")
-        logger.exception("Full exception trace when sending Telegram message:")
+        }
 
 
-def parse_collection_and_query(text: str) -> Tuple[Optional[str], str]:
-    """
-    Allow users to specify a collection inline using the syntax:
-    collection_name::your question
-    """
-    if "::" in text:
-        collection, query = text.split("::", 1)
-        return collection.strip() or None, query.strip()
-    return None, text.strip()
+class TelegramUpdate(BaseModel):
+    """Telegram webhook update model"""
+
+    update_id: int
+    message: Optional[TelegramMessage] = None
 
 
-def _choose_best_qa_result(results) -> Optional[any]:
-    """
-    From a list of Qdrant search results, choose the one that looks
-    most like a real Q&A chunk (starts with 'Q' and contains an 'A' line).
+async def send_telegram_message(
+    chat_id: int, text: str, reply_to_message_id: Optional[int] = None
+):
+    """Send a message via Telegram Bot API"""
+    if not TELEGRAM_API_BASE:
+        raise HTTPException(status_code=500, detail="Telegram bot not configured")
 
-    If none look like Q&A, fall back to the first result.
-    """
-    if not results:
-        return None
+    url = f"{TELEGRAM_API_BASE}/sendMessage"
+    payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
 
-    def qa_score(res) -> int:
-        text = (res.payload.get("text") or "").strip()
-        if not text:
-            return 0
+    if reply_to_message_id:
+        payload["reply_to_message_id"] = reply_to_message_id
 
-        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-        if not lines:
-            return 0
-
-        first_line = lines[0]
-        has_q = first_line.startswith("Q")
-        has_a = any(ln.startswith("A") for ln in lines[1:])
-        long_enough = len(text) > 80
-
-        return int(has_q) + int(has_a) + int(long_enough)
-
-    best = max(results, key=qa_score)
-    if qa_score(best) == 0:
-        return results[0]
-
-    return best
+    async with httpx.AsyncClient() as client:
+        response = await client.post(url, json=payload)
+        if response.status_code != 200:
+            logger.error(f"Failed to send message: {response.text}")
+            raise HTTPException(status_code=500, detail="Failed to send message")
+        return response.json()
 
 
-def _strip_q_prefix(line: str) -> str:
-    return re.sub(r"^Q\d*\.\s*", "", line).strip()
+def _extract_email_or_phone(message: Dict[str, Any], text: str) -> str:
+
+    # 1. Contact-based phone number (when user shares contact)
+    contact = message.get("contact") or {}
+    phone_from_contact = contact.get("phone_number")
+    if phone_from_contact:
+        return phone_from_contact
+
+    # 2. Email in free-form text
+    if text:
+        email_match = re.search(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", text)
+        if email_match:
+            return email_match.group(0)
+
+        # 3. Phone number in free-form text (very permissive)
+        phone_match = re.search(r"\+?\d[\d\-\s]{7,}\d", text)
+        if phone_match:
+            # Normalize: keep digits and leading +
+            raw = phone_match.group(0)
+            normalized = re.sub(r"[^\d+]", "", raw)
+            return normalized
+
+    # 4/5. Fallback to Telegram user metadata
+    from_user = message.get("from") or {}
+    username = from_user.get("username")
+    if username:
+        return username
+
+    from_id = from_user.get("id")
+    if from_id:
+        return str(from_id)
+
+    # 6. Final fallback: chat id
+    chat_id = (message.get("chat") or {}).get("id")
+    return str(chat_id)
 
 
-def _strip_a_prefix(line: str) -> str:
-    return re.sub(r"^A\d*\.\s*", "", line).strip()
+async def call_chat_endpoint(
+    message: str, session_id: str, api_base_url: str = "http://localhost:8000"
+) -> str:
+    """Call the internal chat endpoint to get a response"""
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            # Send the message to the chat endpoint
+            response = await client.post(
+                f"{api_base_url}/api/v1/chat",
+                json={
+                    "session_id": session_id,
+                    "messages": [{"role": "user", "content": message}],
+                },
+            )
+
+            if response.status_code == 200:
+                result = response.json()
+                # Return a simple acknowledgment or extract response from the result
+                return (
+                    f"✅ Message received: "
+                    f"{result.get('message', 'Message processed successfully')}"
+                )
+            else:
+                logger.error(
+                    f"Chat endpoint returned {response.status_code}: {response.text}"
+                )
+                return "❌ Sorry, I couldn't process your message at this time."
+
+    except httpx.TimeoutException:
+        logger.error("Timeout calling chat endpoint")
+        return "⏱️ Request timed out. Please try again."
+    except Exception as e:
+        logger.error(f"Error calling chat endpoint: {str(e)}")
+        return f"❌ Error: {str(e)}"
 
 
-def _format_single_qa_result(result, collection: str, query: str) -> str:
-    """
-    Turn a single Qdrant result into a clean chat-style answer.
-
-    Expected text format (from your new PDF), e.g.:
-
-        Q1. What is ... ?
-        A1. Answer line 1
-            bullet / more lines...
-
-    We return ONLY the answer text, nicely cleaned.
-    """
-    if not result:
-        return "I couldn’t find anything that answers that in your documents."
-
-    text = (result.payload.get("text") or "").strip()
-    lines: List[str] = [ln.strip() for ln in text.splitlines() if ln.strip()]
-
-    if not lines:
-        return "I found a related snippet, but it had no readable text."
-
-    # Try to find a question line and an answer block
-    # Assume first non-empty line is question ("Q...")
-    q_idx = 0
-    question_line = lines[q_idx]
-
-    # Answer starts from next line
-    a_idx = q_idx + 1
-
-    # If that line itself starts with Q (malformed), just treat everything after
-    # the first line as "answer-ish" content.
-    if a_idx >= len(lines):
-        # Just fallback: remove Q/A prefixes and send everything
-        cleaned = " ".join(_strip_q_prefix(_strip_a_prefix(ln)) for ln in lines)
-        cleaned = re.sub(r"\s+", " ", cleaned).strip()
-        return cleaned
-
-    # Build answer lines until next Q block (if any)
-    answer_lines: List[str] = []
-    for i in range(a_idx, len(lines)):
-        candidate = lines[i]
-        if candidate.startswith("Q") and i != a_idx:
-            # next question -> stop
-            break
-        answer_lines.append(candidate)
-
-    # Clean prefixes and whitespace on each line
-    cleaned_answer_lines: List[str] = []
-    for ln in answer_lines:
-        ln = _strip_a_prefix(_strip_q_prefix(ln))
-        ln = re.sub(r"\s+", " ", ln).strip()
-        if ln:
-            cleaned_answer_lines.append(ln)
-
-    if not cleaned_answer_lines:
-        # Fallback: send whole chunk, but strip prefixes
-        cleaned = " ".join(_strip_q_prefix(_strip_a_prefix(ln)) for ln in lines)
-        cleaned = re.sub(r"\s+", " ", cleaned).strip()
-        return cleaned
-
-    # Join answer lines with newlines (keeps bullet/paragraph structure readable)
-    answer = "\n".join(cleaned_answer_lines).strip()
-    return answer
-
-
-def format_results_text(results, collection: str, query: str) -> str:
-    """Wrapper used by the webhook code."""
-    best = _choose_best_qa_result(results)
-    return _format_single_qa_result(best, collection, query)
-
-
-@router.post("/telegram")
+@router.post("/webhook")
 async def telegram_webhook(request: Request):
     """
-    Receive Telegram webhook updates and respond with RAG results.
+    Handle incoming Telegram webhook updates.
 
-    Text format options:
-    - Plain question → searches TELEGRAM_DEFAULT_COLLECTION (or fallback)
-    - collection::question → searches the named collection
+    This endpoint receives messages from Telegram users and responds with
+    relevant information from the configured document collection.
     """
-    if not TELEGRAM_BOT_TOKEN:
-        raise HTTPException(
-            status_code=500,
-            detail="Telegram bot token not configured. Set TELEGRAM_BOT_TOKEN.",
-        )
-
-    if not (openai_client and qdrant_client):
-        raise HTTPException(
-            status_code=500,
-            detail="Embedding or Qdrant clients not configured.",
-        )
-
-    update = await request.json()
-    message = update.get("message") or update.get("edited_message")
-    if not message:
-        return {"ok": True}
-
-    chat = message.get("chat") or {}
-    chat_id = chat.get("id")
-    text = (message.get("text") or "").strip()
-
-    if not chat_id:
-        logger.warning("Received Telegram update without chat_id: %s", update)
-        return {"ok": True}
-
-    if not text:
-        await send_telegram_message(chat_id, "Please send a text message to search.")
-        return {"ok": True}
-
-    if text.startswith("/start"):
-        await send_telegram_message(
-            chat_id,
-            (
-                "Hi! Send me a question and I'll search your documents.\n"
-                "Use collection::question to target a specific dataset.\n"
-                "Example: fake_company::What services does UrbanVista offer?"
-            ),
-        )
-        return {"ok": True}
-
-    inline_collection, query_text = parse_collection_and_query(text)
-
-    # Prefer inline collection > env default > hardcoded fallback
-    collection = (
-        inline_collection
-        or TELEGRAM_DEFAULT_COLLECTION
-        or DEFAULT_FALLBACK_COLLECTION
-    )
-
     try:
-        collections = qdrant_client.get_collections().collections
-        collection_names = [col.name for col in collections]
+        # Parse the webhook payload
+        body = await request.json()
+        logger.info(f"Received Telegram update: {json.dumps(body, indent=2)}")
 
-        if collection not in collection_names:
-            await send_telegram_message(
-                chat_id,
-                f"Collection '{collection}' not found. Available: {', '.join(collection_names)}",
-            )
+        # Extract message data
+        update = body
+        message = update.get("message")
+
+        if not message:
+            logger.info("No message in update, ignoring")
             return {"ok": True}
 
-        query_embedding = generate_embeddings([query_text], openai_client)[0]
-        results = search_collection(
-            qdrant_client=qdrant_client,
-            collection=collection,
-            query_vector=query_embedding,
-            limit=5,
-            score_threshold=None,
-            logger=logger,
-        )
+        chat_id = message.get("chat", {}).get("id")
+        message_id = message.get("message_id")
+        text = (message.get("text") or "").strip()
 
-        response_text = format_results_text(results, collection, query_text)
-        await send_telegram_message(chat_id, response_text)
+        if not text:
+            logger.info("Empty message, ignoring")
+            return {"ok": True}
 
-    except Exception as exc:
-        logger.error(f"Error handling Telegram query: {exc}")
-        logger.exception("Full exception trace during Telegram query:")
+        # Send "typing" action to show bot is processing
+        async with httpx.AsyncClient() as client:
+            await client.post(
+                f"{TELEGRAM_API_BASE}/sendChatAction",
+                json={"chat_id": chat_id, "action": "typing"},
+            )
+
+        # Use person's phone/email (if available) as session_id, with sensible fallbacks
+        identifier = _extract_email_or_phone(message, text)
+        session_id = f"telegram_{identifier}"
+
+        logger.info(f"Using session_id={session_id} for incoming Telegram message")
+
+        # Call the chat endpoint to get a response
+        response_text = await call_chat_endpoint(text, session_id)
+
+        # Send the response back to the user
         await send_telegram_message(
-            chat_id, "Sorry, something went wrong while processing your request."
+            chat_id, response_text, reply_to_message_id=message_id
         )
 
-    return {"ok": True}
+        return {"ok": True}
+
+    except Exception as e:
+        logger.error(f"Error processing webhook: {str(e)}")
+        logger.exception("Full exception trace:")
+
+        # Try to send error message to user if we have a chat_id
+        try:
+            if "chat_id" in locals():
+                error_message = "❌ Sorry, I encountered an error processing your request. Please try again later."
+                await send_telegram_message(chat_id, error_message)
+        except:
+            pass
+
+        return {"ok": False, "error": str(e)}
