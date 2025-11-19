@@ -14,6 +14,7 @@ from config import (
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_DEFAULT_COLLECTION,
 )
+from services.opus import run_opus_sales_workflow
 
 OPUS_BASE = "https://operator.opus.com"
 
@@ -180,8 +181,34 @@ async def telegram_webhook(request: Request):
 
         logger.info(f"Using session_id={session_id} for incoming Telegram message")
 
-        # Call the chat endpoint to get a response
-        response_text = await call_chat_endpoint(text, session_id)
+        # Derive lead information for the Opus workflow from Telegram metadata
+        from_user = message.get("from") or {}
+        lead_name_parts = [
+            from_user.get("first_name"),
+            from_user.get("last_name"),
+        ]
+        lead_name = (
+            " ".join(part for part in lead_name_parts if part)
+            or from_user.get("username")
+            or identifier
+        )
+
+        # Heuristically map identifier into email vs phone for the workflow
+        if "@" in identifier:
+            lead_email = identifier
+            lead_phone = ""
+        else:
+            lead_email = ""
+            lead_phone = identifier
+
+        # Call the Opus workflow to generate the response that will be sent back to chat
+        response_text = await run_opus_sales_workflow(
+            api_base_url=OPUS_BASE,
+            user_enquiry=text,
+            lead_name=lead_name,
+            lead_email=lead_phone,
+            lead_phone=lead_phone,
+        )
 
         # Send the response back to the user
         await send_telegram_message(

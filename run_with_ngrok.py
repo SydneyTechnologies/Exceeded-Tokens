@@ -55,8 +55,14 @@ print(f"[runner] ngrok public URL: {public_url}")
 
 
 # ---------- set Telegram webhook + print getWebhookInfo ----------
+# NOTE:
+#   Our FastAPI route for Telegram is mounted at
+#     /api/v1/telegram/webhook
+#   so the webhook URL we register with Telegram MUST match this path.
 if TELEGRAM_BOT_TOKEN:
-    webhook_url = f"{public_url}/webhooks/telegram"
+    # This must match `APIRouter(prefix="/api/v1/telegram")`
+    # and `@router.post("/webhook")` in `routers/telegram.py`
+    webhook_url = f"{public_url}/api/v1/telegram/webhook"
     base_api = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
     # setWebhook
